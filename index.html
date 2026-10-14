@@ -56,6 +56,7 @@ body { background: var(--bg); color: var(--ink); font-family: var(--f-body); fon
 .days { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; }
 .days button { font: inherit; font-size: 13px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; }
 .days button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.days .sep { width: 1px; align-self: stretch; background: var(--line); margin: 2px 4px; }
 .days .lbl { color: var(--muted); font-size: 12px; align-self: center; margin-right: 4px; }
 
 .dialbox { width: 100%; max-width: 540px; margin: 0 auto; aspect-ratio: 1; }
@@ -159,11 +160,11 @@ input[type="color"] { width: 36px; height: 34px; padding: 2px; border: 1px solid
         <div class="btnrow">
           <button class="btn" id="undo" type="button">撤销 <span class="key">Ctrl+Z</span></button>
           <button class="btn" id="clearScope" type="button">清空当前</button>
-          <button class="btn" id="copyAll" type="button" hidden>复制到全周</button>
+          <button class="btn" id="copyAll" type="button" hidden>复制到全天</button>
           <button class="btn" id="sample" type="button">载入示例</button>
         </div>
         <p class="note" id="sampleNote">当前是<b>示例数据</b>，涂抹后即为你的作息。</p>
-        <p class="hint">快捷键：数字键切换画笔，E 为橡皮。选「全周」时，表盘每格显示一周里最常见的状态，涂抹会同时改动七天。</p>
+        <p class="hint">快捷键：数字键切换画笔，E 为橡皮。选「全天」「工作日」或「休息日」时，表盘每格显示这几天里最常见的状态，涂抹会同时改动这几天。</p>
       </div>
 
       <div class="card">
@@ -237,7 +238,9 @@ try {
   const raw = localStorage.getItem(STORE);
   if (raw) { const p = JSON.parse(raw); if (p && p.grid && p.states) S = Object.assign(defaults(), p, { opts: Object.assign(defaults().opts, p.opts), dialColors: Object.assign(defaults().dialColors, p.dialColors) }); }
 } catch (e) {}
-let day = -1;           // -1 = 全周
+let day = -1;           // -1 全天, -2 工作日, -3 休息日, 0–6 单日
+const scopeDays = d => d >= 0 ? [d] : d === -2 ? [0, 1, 2, 3, 4] : d === -3 ? [5, 6] : [0, 1, 2, 3, 4, 5, 6];
+const scopeName = d => d >= 0 ? DAYS[d] : d === -2 ? '工作日' : d === -3 ? '休息日' : '全天';
 let brush = S.states[0] ? S.states[0].id : 'erase';
 const undoStack = [];
 
@@ -269,11 +272,12 @@ function textOn(hex) {
 
 /* ---------- data views ---------- */
 function slotsFor(d) {
-  if (d >= 0) return S.grid[d];
+  const days = scopeDays(d);
+  if (days.length === 1) return S.grid[days[0]];
   const out = [];
   for (let s = 0; s < SLOTS; s++) {
     const cnt = new Map();
-    for (let i = 0; i < 7; i++) { const v = S.grid[i][s]; cnt.set(v, (cnt.get(v) || 0) + 1); }
+    for (const i of days) { const v = S.grid[i][s]; cnt.set(v, (cnt.get(v) || 0) + 1); }
     let best = null, bc = -1;
     for (const st of S.states) { const c = cnt.get(st.id) || 0; if (c > bc) { bc = c; best = st.id; } }
     if ((cnt.get(null) || 0) > bc) best = null;
@@ -284,7 +288,7 @@ function slotsFor(d) {
 function hoursPerDay(d) {
   const res = {};
   for (const st of S.states) res[st.id] = 0;
-  const rows = d >= 0 ? [S.grid[d]] : S.grid;
+  const rows = scopeDays(d).map(i => S.grid[i]);
   for (const r of rows) for (const v of r) if (v && res[v] != null) res[v] += 0.5;
   for (const k in res) res[k] /= rows.length;
   return res;
@@ -412,8 +416,8 @@ function drawHeat(ctx, G, T, hl) {
   for (let d = 0; d < 7; d++) {
     const ry = G.y + G.headerH + d * G.rowH;
     ctx.textAlign = 'left';
-    ctx.font = `${d === hl ? 700 : 500} ${G.fs}px ${FONT_BODY}`;
-    ctx.fillStyle = d === hl ? T.accent : T.ink;
+    ctx.font = `${hl.includes(d) ? 700 : 500} ${G.fs}px ${FONT_BODY}`;
+    ctx.fillStyle = hl.includes(d) ? T.accent : T.ink;
     ctx.fillText(DAYS[d], G.x, ry + G.rowH / 2);
     // consecutive cells of the same state merge into one block; empty cells stay separate
     const row = S.grid[d];
@@ -426,9 +430,9 @@ function drawHeat(ctx, G, T, hl) {
       ctx.fillRect(x0 + gl, ry + G.gap, x1 - x0 - gl, G.rowH - G.gap * 2);
       s = e + 1;
     }
-    if (d === hl) {
+    if (hl.length && d === Math.min(...hl)) {
       ctx.strokeStyle = T.accent; ctx.lineWidth = 2;
-      ctx.strokeRect(G.x + G.labelW, ry + 0.5, G.w - G.labelW, G.rowH - 1);
+      ctx.strokeRect(G.x + G.labelW, ry + 0.5, G.w - G.labelW, G.rowH * (Math.max(...hl) - d + 1) - 1);
     }
   }
   ctx.restore();
@@ -449,7 +453,7 @@ function renderDial() {
   ctx.clearRect(0, 0, w, w);
   const R = w / 2 - 4;
   dialGeo = { cx: w / 2, cy: w / 2, R };
-  drawDial(ctx, w / 2, w / 2, R, T, slotsFor(day), day < 0 ? '全周' : DAYS[day], S.opts);
+  drawDial(ctx, w / 2, w / 2, R, T, slotsFor(day), scopeName(day), S.opts);
 }
 function renderHeat() {
   $('heatSection').hidden = !S.opts.heat;
@@ -458,7 +462,7 @@ function renderHeat() {
   heatGeo = heatGeom(0, 0, w);
   const ctx = fitCanvas(heatC, w, heatGeo.h);
   ctx.clearRect(0, 0, w, heatGeo.h);
-  drawHeat(ctx, heatGeo, screenTheme(), day);
+  drawHeat(ctx, heatGeo, screenTheme(), day === -1 ? [] : scopeDays(day));
 }
 function renderLegend() {
   const hrs = hoursPerDay(day), el = $('legend'); el.textContent = '';
@@ -497,14 +501,16 @@ function renderPalette() {
 function renderDays() {
   const el = $('days'); el.textContent = '';
   const l = document.createElement('span'); l.className = 'lbl'; l.textContent = '表盘编辑'; el.append(l);
-  [['全周', -1]].concat(DAYS.map((d, i) => [d, i])).forEach(([name, i]) => {
+  [['全天', -1], ['工作日', -2], ['休息日', -3], null].concat(DAYS.map((d, i) => [d, i])).forEach(item => {
+    if (!item) { const sep = document.createElement('span'); sep.className = 'sep'; sep.setAttribute('aria-hidden', 'true'); el.append(sep); return; }
+    const [name, i] = item;
     const b = document.createElement('button'); b.type = 'button'; b.textContent = name;
     b.setAttribute('aria-pressed', String(day === i));
     b.onclick = () => setDay(i);
     el.append(b);
   });
-  $('copyAll').hidden = day < 0;
-  $('clearScope').textContent = day < 0 ? '清空全周' : '清空' + DAYS[day];
+  $('copyAll').hidden = day === -1;
+  $('clearScope').textContent = '清空' + scopeName(day);
 }
 function setDay(i) { day = i; renderDays(); renderDial(); renderHeat(); renderLegend(); }
 const DIAL_PARTS = [['bezel', '表盘边框', '跟随主题'], ['tick', '刻度', '自动对比'], ['num', '数字', '自动对比'], ['hub', '圆心', '跟随主题']];
@@ -557,7 +563,7 @@ const paintVal = () => brush === 'erase' ? null : brush;
 function markEdited() { if (S.isSample) { S.isSample = false; renderText(); } }
 function setDialSlot(s) {
   const v = paintVal();
-  if (day < 0) for (let d = 0; d < 7; d++) S.grid[d][s] = v; else S.grid[day][s] = v;
+  for (const d of scopeDays(day)) S.grid[d][s] = v;
 }
 function dialHit(e, loose) {
   if (!dialGeo) return null;
@@ -602,7 +608,7 @@ dialC.addEventListener('pointermove', e => {
     painting.last = s; applyDialStroke(); renderDial(); renderHeat(); renderLegend();
   } else {
     const s = dialHit(e, false);
-    $('readout').textContent = s == null ? ' ' : `${fmt(s)}–${fmt(s + 1)} · ${day < 0 ? '全周' : DAYS[day]} · ${stateName(slotsFor(day)[s])}`;
+    $('readout').textContent = s == null ? ' ' : `${fmt(s)}–${fmt(s + 1)} · ${scopeName(day)} · ${stateName(slotsFor(day)[s])}`;
   }
 });
 heatC.addEventListener('pointerdown', e => {
@@ -659,13 +665,12 @@ $('addState').onclick = () => {
 $('undo').onclick = undo;
 $('clearScope').onclick = () => {
   pushUndo(); markEdited();
-  if (day < 0) S.grid = Array.from({ length: 7 }, () => new Array(SLOTS).fill(null));
-  else S.grid[day] = new Array(SLOTS).fill(null);
+  for (const d of scopeDays(day)) S.grid[d] = new Array(SLOTS).fill(null);
   renderAll(false);
 };
 $('copyAll').onclick = () => {
-  if (day < 0) return; pushUndo(); markEdited();
-  const src = S.grid[day].slice(); S.grid = S.grid.map(() => src.slice()); renderAll(false);
+  if (day === -1) return; pushUndo(); markEdited();
+  const src = slotsFor(day).slice(); S.grid = S.grid.map(() => src.slice()); renderAll(false);
 };
 $('sample').onclick = () => { pushUndo(); S.grid = sampleGrid(); S.isSample = true; renderAll(false); };
 function setBg(v) { S.exportBg = v; $('bgLight').setAttribute('aria-pressed', String(v === 'light')); $('bgDark').setAttribute('aria-pressed', String(v === 'dark')); persist(); }
@@ -718,7 +723,7 @@ function drawPoster(ctx, L, T) {
     ctx.fillText(S.title, W / 2, L.title.y);
     if (L.sub) { ctx.fillStyle = T.muted; ctx.font = `500 28px ${FONT_BODY}`; ctx.fillText(S.subtitle, W / 2, L.sub.y); }
   }
-  drawDial(ctx, L.dial.cx, L.dial.cy, L.dial.R, T, slotsFor(day), day < 0 ? '全周' : DAYS[day], S.opts);
+  drawDial(ctx, L.dial.cx, L.dial.cy, L.dial.R, T, slotsFor(day), scopeName(day), S.opts);
   L.legend.lines.forEach((line, li) => {
     const total = line.reduce((a, c) => a + c.w, 0) + 40 * (line.length - 1);
     let x = (W - total) / 2; const y = L.legend.y + li * 52 + 20;
@@ -734,11 +739,11 @@ function drawPoster(ctx, L, T) {
     ctx.fillText('一 周 热 力 图', pad, L.heatLabel.y);
     ctx.strokeStyle = T.line; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(pad + 170, L.heatLabel.y); ctx.lineTo(W - pad, L.heatLabel.y); ctx.stroke();
-    drawHeat(ctx, L.heat, T, -1);
+    drawHeat(ctx, L.heat, T, []);
   }
   const d = new Date();
   ctx.textAlign = 'center'; ctx.fillStyle = T.muted; ctx.font = `500 20px ${FONT_MONO}`;
-  ctx.fillText(`表盘：${day < 0 ? '全周' : DAYS[day]}  ·  每格 30 分钟  ·  ${d.getFullYear()}.${pad2(d.getMonth() + 1)}.${pad2(d.getDate())}`, W / 2, L.footer.y);
+  ctx.fillText(`表盘：${scopeName(day)}  ·  每格 30 分钟  ·  ${d.getFullYear()}.${pad2(d.getMonth() + 1)}.${pad2(d.getDate())}`, W / 2, L.footer.y);
 }
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
